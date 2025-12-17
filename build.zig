@@ -6,7 +6,7 @@ const std = @import("std");
 // for defining build steps and express dependencies between them, allowing the
 // build runner to parallelize the build automatically (and the cache system to
 // know when a step doesn't need to be re-run).
-pub fn build(b: *std.Build) void {
+pub fn build(b: *std.Build) !void {
     // Standard target options allow the person running `zig build` to choose
     // what target to build for. Here we do not override the defaults, which
     // means any target is allowed, and the default is native. Other options
@@ -28,129 +28,99 @@ pub fn build(b: *std.Build) void {
     // to our consumers. We must give it a name because a Zig package can expose
     // multiple modules and consumers will need to be able to specify which
     // module they want to access.
-    const mod = b.addModule("aoc_zig", .{
-        // The root source file is the "entry point" of this module. Users of
-        // this module will only be able to access public declarations contained
-        // in this file, which means that if you have declarations that you
-        // intend to expose to consumers that were defined in other files part
-        // of this module, you will have to make sure to re-export them from
-        // the root file.
-        .root_source_file = b.path("src/root.zig"),
-        // Later on we'll use this module as the root module of a test executable
-        // which requires us to specify a target.
+    const utils_mod = b.addModule("utils", .{
+        .root_source_file = b.path("src/utils.zig"),
         .target = target,
     });
 
-    // Here we define an executable. An executable needs to have a root module
-    // which needs to expose a `main` function. While we could add a main function
-    // to the module defined above, it's sometimes preferable to split business
-    // logic and the CLI into two separate modules.
-    //
-    // If your goal is to create a Zig library for others to use, consider if
-    // it might benefit from also exposing a CLI tool. A parser library for a
-    // data serialization format could also bundle a CLI syntax checker, for example.
-    //
-    // If instead your goal is to create an executable, consider if users might
-    // be interested in also being able to embed the core functionality of your
-    // program in their own executable in order to avoid the overhead involved in
-    // subprocessing your CLI tool.
-    //
-    // If neither case applies to you, feel free to delete the declaration you
-    // don't need and to put everything under a single module.
-    const exe = b.addExecutable(.{
-        .name = "aoc_zig",
-        .root_module = b.createModule(.{
-            // b.createModule defines a new module just like b.addModule but,
-            // unlike b.addModule, it does not expose the module to consumers of
-            // this package, which is why in this case we don't have to give it a name.
-            .root_source_file = b.path("src/main.zig"),
-            // Target and optimization levels must be explicitly wired in when
-            // defining an executable or library (in the root module), and you
-            // can also hardcode a specific target for an executable or library
-            // definition if desireable (e.g. firmware for embedded devices).
-            .target = target,
-            .optimize = optimize,
-            // List of modules available for import in source files part of the
-            // root module.
-            .imports = &.{
-                // Here "aoc_zig" is the name you will use in your source code to
-                // import this module (e.g. `@import("aoc_zig")`). The name is
-                // repeated because you are allowed to rename your imports, which
-                // can be extremely useful in case of collisions (which can happen
-                // importing modules from different packages).
-                .{ .name = "aoc_zig", .module = mod },
-            },
-        }),
-    });
+    const days = &[_][]const u8{
+        "day01",
+    };
 
-    // This declares intent for the executable to be installed into the
-    // install prefix when running `zig build` (i.e. when executing the default
-    // step). By default the install prefix is `zig-out/` but can be overridden
-    // by passing `--prefix` or `-p`.
-    b.installArtifact(exe);
+    var buf: [50]u8 = undefined;
+    const has_hyperfine = try findProgram(b.allocator, "hyperfine");
+    const has_uv = try findProgram(b.allocator, "uv");
 
-    // This creates a top level step. Top level steps have a name and can be
-    // invoked by name when running `zig build` (e.g. `zig build run`).
-    // This will evaluate the `run` step rather than the default step.
-    // For a top level step to actually do something, it must depend on other
-    // steps (e.g. a Run step, as we will see in a moment).
-    const run_step = b.step("run", "Run the app");
+    for (days) |day| {
+        const zig_file = try std.fmt.bufPrint(&buf, "src/{s}/main.zig", .{day});
 
-    // This creates a RunArtifact step in the build graph. A RunArtifact step
-    // invokes an executable compiled by Zig. Steps will only be executed by the
-    // runner if invoked directly by the user (in the case of top level steps)
-    // or if another step depends on it, so it's up to you to define when and
-    // how this Run step will be executed. In our case we want to run it when
-    // the user runs `zig build run`, so we create a dependency link.
-    const run_cmd = b.addRunArtifact(exe);
-    run_step.dependOn(&run_cmd.step);
+        const exe = b.addExecutable(.{ .name = day, .root_module = b.createModule(.{ .root_source_file = b.path(zig_file), .target = target, .optimize = optimize, .imports = &.{
+            .{ .name = "utils", .module = utils_mod },
+        } }) });
 
-    // By making the run step depend on the default step, it will be run from the
-    // installation directory rather than directly from within the cache directory.
-    run_cmd.step.dependOn(b.getInstallStep());
+        b.installArtifact(exe);
 
-    // This allows the user to pass arguments to the application in the build
-    // command itself, like this: `zig build run -- arg1 arg2 etc`
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
+        // Create the run step
+        const run_cmd = b.addRunArtifact(exe);
+        run_cmd.step.dependOn(b.getInstallStep());
+        if (b.args) |args| {
+            run_cmd.addArgs(args);
+        }
+
+        // Create the run step
+        const run_step_name = try std.fmt.bufPrint(&buf, "run-{s}", .{day});
+        const run_step = b.step(run_step_name, "Run the zig solution");
+        run_step.dependOn(&run_cmd.step);
+
+        // Create the bench step
+        const bench_step_name = try std.fmt.bufPrint(&buf, "bench-{s}", .{day});
+        const bench_step = b.step(bench_step_name, "Benchmark the zig solution against baseline");
+        bench_step.dependOn(b.getInstallStep());
+        if (has_hyperfine and has_uv) {
+            var bin_buf: [50]u8 = undefined;
+            const zig_bin_path = try std.fmt.bufPrint(&bin_buf, "zig-out/bin/{s}", .{day});
+            var mod_buf: [50]u8 = undefined;
+            const py_module = try std.fmt.bufPrint(&mod_buf, "src.{s}.main", .{day});
+            var py_buf: [50]u8 = undefined;
+            const py_cmd = try std.fmt.bufPrint(&py_buf, "uv run -m {s}", .{py_module});
+
+            // Run hyperfine
+            const bench_cmd = b.addSystemCommand(&.{
+                "hyperfine",
+                "--warmup",
+                "3",
+                "--shell",
+                "none",
+                zig_bin_path,
+                py_cmd,
+            });
+            bench_step.dependOn(&bench_cmd.step);
+        } else {
+            const error_cmd = b.addSystemCommand(&.{
+                "echo",
+                "hyperfine or uv not found",
+                "exit",
+                "1",
+            });
+            bench_step.dependOn(&error_cmd.step);
+        }
+
+        // Create the test step
+        const exe_tests = b.addTest(.{
+            .root_module = exe.root_module,
+        });
+
+        const run_exe_tests = b.addRunArtifact(exe_tests);
+        const test_step_name = try std.fmt.bufPrint(&buf, "test-{s}", .{day});
+        const test_step = b.step(test_step_name, "Run the zig tests");
+        test_step.dependOn(&run_exe_tests.step);
     }
+}
 
-    // Creates an executable that will run `test` blocks from the provided module.
-    // Here `mod` needs to define a target, which is why earlier we made sure to
-    // set the releative field.
-    const mod_tests = b.addTest(.{
-        .root_module = mod,
+fn findProgram(alloc: std.mem.Allocator, program: []const u8) !bool {
+    const child = std.process.Child;
+    const argv = [_][]const u8{ "which", program };
+
+    const proc = try child.run(.{
+        .argv = &argv,
+        .allocator = alloc,
     });
 
-    // A run step that will run the test executable.
-    const run_mod_tests = b.addRunArtifact(mod_tests);
+    defer alloc.free(proc.stdout);
+    defer alloc.free(proc.stderr);
 
-    // Creates an executable that will run `test` blocks from the executable's
-    // root module. Note that test executables only test one module at a time,
-    // hence why we have to create two separate ones.
-    const exe_tests = b.addTest(.{
-        .root_module = exe.root_module,
-    });
-
-    // A run step that will run the second test executable.
-    const run_exe_tests = b.addRunArtifact(exe_tests);
-
-    // A top level step for running all tests. dependOn can be called multiple
-    // times and since the two run steps do not depend on one another, this will
-    // make the two of them run in parallel.
-    const test_step = b.step("test", "Run tests");
-    test_step.dependOn(&run_mod_tests.step);
-    test_step.dependOn(&run_exe_tests.step);
-
-    // Just like flags, top level steps are also listed in the `--help` menu.
-    //
-    // The Zig build system is entirely implemented in userland, which means
-    // that it cannot hook into private compiler APIs. All compilation work
-    // orchestrated by the build system will result in other Zig compiler
-    // subcommands being invoked with the right flags defined. You can observe
-    // these invocations when one fails (or you pass a flag to increase
-    // verbosity) to validate assumptions and diagnose problems.
-    //
-    // Lastly, the Zig build system is relatively simple and self-contained,
-    // and reading its source code will allow you to master it.
+    if (proc.term.Exited == 0) {
+        return true;
+    }
+    return false;
 }
