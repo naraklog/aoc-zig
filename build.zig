@@ -40,35 +40,52 @@ pub fn build(b: *std.Build) !void {
     var buf: [50]u8 = undefined;
     const has_hyperfine = try findProgram(b.allocator, "hyperfine");
     const has_uv = try findProgram(b.allocator, "uv");
+    const variants = [_][]const u8{ "simple", "main" };
 
     for (days) |day| {
-        const zig_file = try std.fmt.bufPrint(&buf, "src/{s}/main.zig", .{day});
+        for (variants) |variant| {
+            const zig_file = try std.fmt.bufPrint(&buf, "src/{s}/{s}.zig", .{ day, variant });
+            var exe_buf: [50]u8 = undefined;
+            const exe_name = try std.fmt.bufPrint(&exe_buf, "{s}-{s}", .{ day, variant });
 
-        const exe = b.addExecutable(.{ .name = day, .root_module = b.createModule(.{ .root_source_file = b.path(zig_file), .target = target, .optimize = optimize, .imports = &.{
-            .{ .name = "utils", .module = utils_mod },
-        } }) });
+            const exe = b.addExecutable(.{ .name = exe_name, .root_module = b.createModule(.{ .root_source_file = b.path(zig_file), .target = target, .optimize = optimize, .imports = &.{
+                .{ .name = "utils", .module = utils_mod },
+            } }) });
 
-        b.installArtifact(exe);
+            b.installArtifact(exe);
 
-        // Create the run step
-        const run_cmd = b.addRunArtifact(exe);
-        run_cmd.step.dependOn(b.getInstallStep());
-        if (b.args) |args| {
-            run_cmd.addArgs(args);
+            // Create the run step
+            const run_cmd = b.addRunArtifact(exe);
+            run_cmd.step.dependOn(b.getInstallStep());
+            if (b.args) |args| {
+                run_cmd.addArgs(args);
+            }
+
+            // Create the run step
+            const run_step_name = try std.fmt.bufPrint(&buf, "run-{s}-{s}", .{ day, variant });
+            const run_step = b.step(run_step_name, "Run the zig solution");
+            run_step.dependOn(&run_cmd.step);
+
+            // Create the test step
+            const exe_tests = b.addTest(.{
+                .root_module = exe.root_module,
+            });
+
+            const run_exe_tests = b.addRunArtifact(exe_tests);
+            const test_step_name = try std.fmt.bufPrint(&buf, "test-{s}-{s}", .{ day, variant });
+            const test_step = b.step(test_step_name, "Run the zig tests");
+            test_step.dependOn(&run_exe_tests.step);
         }
-
-        // Create the run step
-        const run_step_name = try std.fmt.bufPrint(&buf, "run-{s}", .{day});
-        const run_step = b.step(run_step_name, "Run the zig solution");
-        run_step.dependOn(&run_cmd.step);
 
         // Create the bench step
         const bench_step_name = try std.fmt.bufPrint(&buf, "bench-{s}", .{day});
         const bench_step = b.step(bench_step_name, "Benchmark the zig solution against baseline");
         bench_step.dependOn(b.getInstallStep());
         if (has_hyperfine and has_uv) {
-            var bin_buf: [50]u8 = undefined;
-            const zig_bin_path = try std.fmt.bufPrint(&bin_buf, "zig-out/bin/{s}", .{day});
+            var simple_bin_buf: [50]u8 = undefined;
+            const zig_simple_bin_path = try std.fmt.bufPrint(&simple_bin_buf, "zig-out/bin/{s}-simple", .{day});
+            var main_bin_buf: [50]u8 = undefined;
+            const zig_main_bin_path = try std.fmt.bufPrint(&main_bin_buf, "zig-out/bin/{s}-main", .{day});
             var mod_buf: [50]u8 = undefined;
             const py_module = try std.fmt.bufPrint(&mod_buf, "src.{s}.main", .{day});
             var py_buf: [50]u8 = undefined;
@@ -81,7 +98,8 @@ pub fn build(b: *std.Build) !void {
                 "3",
                 "--shell",
                 "none",
-                zig_bin_path,
+                zig_simple_bin_path,
+                zig_main_bin_path,
                 py_cmd,
             });
             bench_step.dependOn(&bench_cmd.step);
@@ -94,16 +112,6 @@ pub fn build(b: *std.Build) !void {
             });
             bench_step.dependOn(&error_cmd.step);
         }
-
-        // Create the test step
-        const exe_tests = b.addTest(.{
-            .root_module = exe.root_module,
-        });
-
-        const run_exe_tests = b.addRunArtifact(exe_tests);
-        const test_step_name = try std.fmt.bufPrint(&buf, "test-{s}", .{day});
-        const test_step = b.step(test_step_name, "Run the zig tests");
-        test_step.dependOn(&run_exe_tests.step);
     }
 }
 
